@@ -1,0 +1,102 @@
+name: Deploy Changed Features
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'features/**'
+  workflow_dispatch:
+    inputs:
+      feature_name:
+        description: 'Feature to deploy (leave empty for auto-detect)'
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      features: ${{ steps.detect.outputs.features }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Detect Changed Features
+        id: detect
+        run: |
+          if [ -n "${{ github.event.inputs.feature_name }}" ]; then
+            # Manual trigger
+            FEATURES='["${{ github.event.inputs.feature_name }}"]'
+          else
+            # Auto-detect from git diff
+            CHANGED_DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^features/' | cut -d'/' -f2 | sort -u)
+            FEATURES=$(echo "$CHANGED_DIRS" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          
+          echo "features=$FEATURES" >> $GITHUB_OUTPUT
+          echo "Changed features: $FEATURES"
+
+  deploy:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.features != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature: ${{ fromJson(needs.detect-changes.outputs.features) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT_EMAIL }}
+      
+      - uses: google-github-actions/setup-gcloud@v2
+      
+      - name: Get Base Outputs
+        id: base
+        run: |
+          gsutil cp gs://${{ secrets.TERRAFORM_BACKEND_BUCKET }}/base/${{ secrets.ENVIRONMENT }}/default.tfstate state.json
+          
+          echo "project_id=$(jq -r '.outputs.project_id.value' state.json)" >> $GITHUB_OUTPUT
+          echo "region=$(jq -r '.outputs.region.value' state.json)" >> $GITHUB_OUTPUT
+          echo "registry_url=$(jq -r '.outputs.artifact_registry_url.value' state.json)" >> $GITHUB_OUTPUT
+      
+      - name: Build and Push
+        working-directory: features/${{ matrix.feature }}
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::8}
+          IMAGE_URI=${{ steps.base.outputs.registry_url }}/${{ matrix.feature }}:${IMAGE_TAG}
+          
+          gcloud auth configure-docker ${{ steps.base.outputs.region }}-docker.pkg.dev
+          
+          docker build -t ${IMAGE_URI} .
+          docker push ${IMAGE_URI}
+          
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
+      
+      - name: Deploy with Terraform
+        working-directory: features/${{ matrix.feature }}/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_BACKEND_BUCKET }}" \
+            -backend-config="prefix=features/${{ matrix.feature }}/${{ secrets.ENVIRONMENT }}"
+          
+          terraform apply -auto-approve \
+            -var="project_id=${{ steps.base.outputs.project_id }}" \
+            -var="region=${{ steps.base.outputs.region }}" \
+            -var="environment=${{ secrets.ENVIRONMENT }}" \
+            -var="feature_name=${{ matrix.feature }}" \
+            -var="image_uri=${IMAGE_URI}" \
+            -var="backend_bucket=${{ secrets.TERRAFORM_BACKEND_BUCKET }}"
+      
+      - name: Summary
+        run: |
+          echo "Deployed: ${{ matrix.feature }}"
+          echo "Image: ${IMAGE_URI}"
+          echo "Job: ${{ secrets.ENVIRONMENT }}-${{ matrix.feature }}-job"
