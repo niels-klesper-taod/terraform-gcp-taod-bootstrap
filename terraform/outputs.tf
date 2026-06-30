@@ -17,6 +17,11 @@ output "cloud_run_jobs_service_account" {
   description = "Service account email for Cloud Run Jobs"
 }
 
+output "scheduler_service_account_email" {
+  value       = google_service_account.scheduler.email
+  description = "Service account email for Cloud Scheduler to invoke jobs"
+}
+
 # Artifact Registry Outputs
 
 output "artifact_registry_repository" {

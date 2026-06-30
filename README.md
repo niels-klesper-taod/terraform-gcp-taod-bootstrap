@@ -1,32 +1,43 @@
-# GCP MVP Project - Base Infrastructure
+# GCP Ingestion Base Infrastructure Template
 
-Base infrastructure for Cloud Run Job features deployed from a separate repository.
+Base infrastructure template for Cloud Run Job ingestion features deployed from a separate repository.
 
-## Architecture Overview
+## Multi-Repo Setup
 
-This is a **multi-repo setup**:
+This project follows a **multi-repo pattern** to separate concerns between platform infrastructure and feature deployments:
 
-- **This repo** (`nc-gcp-mvp`): Base infrastructure (Composer, Service Accounts, Workload Identity)
-- **Features repo** (separate): Individual Cloud Run Job features with auto-deployment
+- **This repo** (`terraform-gcp-taod-bootstrap`): Base infrastructure (Cloud Scheduler, Service Accounts, Workload Identity, Artifact Registry) – deployed per environment
+- **Features repo** (`terraform-gcp-features`): Individual Cloud Run Job ingestion features with auto-deployment via GitHub Actions
+
+### Repository Structure
 
 ```
-Repository: nc-gcp-mvp (THIS REPO)
+Repository: terraform-gcp-taod-bootstrap (THIS REPO)
+├── docs/
+│   └── BOOTSTRAP.md         # Bootstrap guide for first-time setup
 ├── terraform/
-│   ├── main.tf          # Base infrastructure
-│   ├── outputs.tf       # Outputs for features to consume
-│   ├── variables.tf
+│   ├── main.tf                # Base infrastructure (SAs, IAM, WI, Scheduler)
+│   ├── outputs.tf             # Outputs for features to consume
+│   ├── variables.tf           # Input variables
 │   ├── backend/
-│   │   └── dev.tfbackend
+│   │   └── dev.tfbackend      # GCS state backend config
 │   └── environment/
-│       └── dev.tfvars
+│       └── dev.tfvars         # Environment-specific variables
 
-Repository: nc-gcp-features (SEPARATE REPO)
+Repository: terraform-gcp-features (SEPARATE REPO)
 ├── .github/workflows/
-│   └── deploy-features.yml
+│   └── deploy-features.yml    # CI/CD: build, push, deploy
+├── Dockerfile                 # Shared Dockerfile at root
+├── requirements.txt           # Shared Python dependencies
+├── terraform/
+│   └── main.tf                # Feature Cloud Run Job + Scheduler cron
 └── features/
     ├── data-ingestion-a/
+    │   └── main.py
     ├── data-ingestion-b/
+    │   └── main.py
     └── example-feature/
+        └── main.py
 ```
 
 ## Table of Contents
@@ -44,11 +55,11 @@ Repository: nc-gcp-features (SEPARATE REPO)
 
 ### Infrastructure Components
 
-- **Cloud Composer** - Managed Airflow for orchestration
+- **Cloud Scheduler** - Managed cron service for triggering Cloud Run Jobs
 - **Artifact Registry** - Docker image storage for features
 - **Secret Manager** - Secure configuration storage
 - **Workload Identity** - Keyless authentication for GitHub Actions
-- **Service Accounts** - Dedicated accounts for Composer, Cloud Run Jobs, and CI/CD
+- **Service Accounts** - Dedicated accounts for Cloud Run Jobs, Scheduler, and CI/CD
 
 ### Outputs for Features
 
@@ -58,17 +69,16 @@ This infrastructure exposes outputs that features consume:
 - `cicd_service_account_email` - CI/CD service account
 - `cloud_run_jobs_service_account` - Runtime service account for jobs
 - `artifact_registry_url` - Docker registry URL
-- `composer_airflow_uri` - Airflow web UI URL
+- `scheduler_service_account_email` - Service account for Cloud Scheduler to invoke jobs
 - `project_id`, `region`, `environment` - Project configuration
 
 ## Base Infrastructure
 
 ### Service Accounts
 
-1. **Composer** (`{env}-composer-{project}`)
-   - Role: `roles/composer.worker`
+1. **Scheduler** (`{env}-scheduler`)
    - Role: `roles/run.invoker` (to invoke Cloud Run Jobs)
-   - Purpose: Airflow orchestration
+   - Purpose: Cloud Scheduler cron triggers
 
 2. **Cloud Run Jobs** (`{env}-cloud-run-jobs`)
    - Role: `roles/bigquery.dataEditor`
@@ -99,7 +109,7 @@ Enables keyless authentication from GitHub Actions:
 - GitHub repository for features (will be configured)
 
 > **⚠️ First Time Setup?** You need to create a GCS bucket for Terraform state first.  
-> See **[BOOTSTRAP.md](BOOTSTRAP.md)** for detailed bootstrap instructions.
+> See **[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)** for detailed bootstrap instructions.
 
 ### 1. Bootstrap (First Time Only)
 
@@ -119,7 +129,7 @@ gcloud storage buckets create gs://${BUCKET_NAME} \
 gcloud storage buckets update gs://${BUCKET_NAME} --versioning
 ```
 
-> **📖 Detailed Instructions**: See [BOOTSTRAP.md](BOOTSTRAP.md) for complete bootstrap guide.
+> **📖 Detailed Instructions**: See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for complete bootstrap guide.
 
 ### 2. Configure Backend
 
@@ -154,7 +164,7 @@ vim environment/dev.tfvars
 project_id         = "your-gcp-project-id"
 region            = "europe-west2"
 environment       = "dev"
-github_repository = "your-org/nc-gcp-features"  # Your FEATURES repo
+github_repository = "your-org/terraform-gcp-features"  # Your FEATURES repo
 ```
 
 > **Important**: `github_repository` should point to your **features repository**, not this one!
@@ -173,7 +183,7 @@ terraform apply -var-file=environment/dev.tfvars
 ```
 
 This will create:
-- ✅ Cloud Composer environment (~15-20 minutes)
+- ✅ Cloud Scheduler service account
 - ✅ Artifact Registry repository
 - ✅ Service accounts with IAM bindings
 - ✅ Workload Identity pool and provider
@@ -191,7 +201,7 @@ terraform output
 terraform output workload_identity_provider
 terraform output cicd_service_account_email
 terraform output artifact_registry_url
-terraform output composer_airflow_uri
+terraform output scheduler_service_account_email
 ```
 
 **Save these values** - you'll need them for the features repository setup.
@@ -206,8 +216,7 @@ terraform output composer_airflow_uri
 | `cicd_service_account_email` | Email of CI/CD service account | Features repo GitHub secret |
 | `cloud_run_jobs_service_account` | Email of Cloud Run Jobs service account | Feature Terraform (via remote state) |
 | `artifact_registry_url` | Docker registry URL | Feature CI/CD (via remote state) |
-| `composer_airflow_uri` | Airflow web UI URL | Access Airflow UI |
-| `composer_dag_gcs_prefix` | GCS path for DAGs | Upload DAGs |
+| `scheduler_service_account_email` | Service account for Cloud Scheduler | Feature Terraform (via remote state) |
 | `project_id` | GCP Project ID | Feature Terraform (via remote state) |
 | `region` | GCP Region | Feature Terraform (via remote state) |
 | `environment` | Environment name | Feature Terraform (via remote state) |
@@ -227,141 +236,7 @@ terraform output workload_identity_provider
 terraform output -json
 ```
 
-## Features Repository Setup
-
-### 1. Create Features Repository
-
-Create a new repository (e.g., `nc-gcp-features`) with this structure:
-
-```
-nc-gcp-features/
-├── .github/workflows/
-│   └── deploy-features.yml      # CI/CD workflow
-└── features/
-    ├── example-feature/         # Template
-    │   ├── terraform/main.tf
-    │   ├── Dockerfile
-    │   ├── main.py
-    │   └── requirements.txt
-    ├── data-ingestion-a/
-    └── data-ingestion-b/
-```
-
-### 2. Add GitHub Secrets to Features Repo
-
-In your **features repository**, add these secrets:
-
-**Settings → Secrets and variables → Actions → New repository secret**
-
-| Secret Name | Value | How to Get |
-|-------------|-------|------------|
-| `WORKLOAD_IDENTITY_PROVIDER` | Full WI provider path | `terraform output workload_identity_provider` (from this repo) |
-| `SERVICE_ACCOUNT_EMAIL` | CI/CD service account email | `terraform output cicd_service_account_email` (from this repo) |
-| `TERRAFORM_BACKEND_BUCKET` | GCS bucket name | Your state bucket name |
-| `ENVIRONMENT` | Environment name | `dev` or `prod` |
-
-### 3. Copy CI/CD Workflow
-
-Copy the workflow template from this repo to your features repo:
-
-```bash
-# In features repo
-mkdir -p .github/workflows
-
-# Copy from this repo (or use the template in features/possible_cicd.yaml)
-cp /path/to/nc-gcp-mvp/features/possible_cicd.yaml .github/workflows/deploy-features.yml
-
-# Commit
-git add .github/workflows/
-git commit -m "Add CI/CD workflow"
-git push
-```
-
-### 4. Add Features
-
-```bash
-# In features repo
-cp -r features/example-feature features/my-new-feature
-
-# Edit files
-vim features/my-new-feature/main.py
-
-# Push
-git add features/my-new-feature
-git commit -m "Add my-new-feature"
-git push
-```
-
-**GitHub Actions will auto-detect and deploy!**
-
-## How Features Connect
-
-### Remote State Access
-
-Features read base infrastructure outputs via Terraform remote state:
-
-**In feature's `terraform/main.tf`:**
-
-```hcl
-# Read base infrastructure outputs
-data "terraform_remote_state" "base" {
-  backend = "gcs"
-  config = {
-    bucket = var.backend_bucket
-    prefix = "base/${var.environment}"  # Points to THIS repo's state
-  }
-}
-
-# Use outputs
-resource "google_cloud_run_v2_job" "job" {
-  # ...
-  
-  template {
-    template {
-      # Use service account from base infrastructure
-      service_account = data.terraform_remote_state.base.outputs.cloud_run_jobs_service_account
-      
-      containers {
-        # Image pushed to Artifact Registry from base infrastructure
-        image = "${data.terraform_remote_state.base.outputs.artifact_registry_url}/${var.feature_name}:${var.image_tag}"
-      }
-    }
-  }
-}
-```
-
-### Authentication Flow
-
-```
-GitHub Actions (features repo)
-    ↓
-Authenticate via Workload Identity (from base infra)
-    ↓
-Impersonate CI/CD Service Account (from base infra)
-    ↓
-Push to Artifact Registry (from base infra)
-    ↓
-Deploy Cloud Run Job with Runtime SA (from base infra)
-```
-
-### Triggering from Composer
-
-Airflow (from base infra) triggers Cloud Run Jobs (from features repo):
-
-```python
-from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
-
-run_job = CloudRunExecuteJobOperator(
-    task_id='run_data_ingestion',
-    project_id='your-project',
-    region='europe-west2',
-    job_name='dev-data-ingestion-a-job',  # Deployed from features repo
-)
-```
-
 ## State Storage
-
-### State Organization
 
 ```
 gs://your-terraform-state-bucket/
@@ -371,16 +246,12 @@ gs://your-terraform-state-bucket/
 └── features/
     ├── data-ingestion-a/dev/
     │   └── default.tfstate          # Features repo - Feature A
-    ├── data-ingestion-b/dev/
-    │   └── default.tfstate          # Features repo - Feature B
-    └── my-new-feature/dev/
-        └── default.tfstate          # Features repo - Your feature
+    └── data-ingestion-b/dev/
+        └── default.tfstate          # Features repo - Feature B
 ```
 
-### State Access
-
-- **Base state** (`base/dev/default.tfstate`): Written by this repo, read by features repo
-- **Feature states** (`features/*/dev/default.tfstate`): Written and read by features repo
+- **Base state** (`base/dev/...`): Written by this repo, read by features repo
+- **Feature states** (`features/*/dev/...`): Written and read by features repo
 
 ## Updating Infrastructure
 
@@ -430,7 +301,7 @@ terraform apply -var-file=environment/dev.tfvars
 ### This Repo (Base Infrastructure)
 
 **Manages:**
-- ✅ Cloud Composer environment
+- ✅ Cloud Scheduler service account
 - ✅ Artifact Registry repository
 - ✅ Service accounts and IAM
 - ✅ Workload Identity Federation
@@ -441,21 +312,6 @@ terraform apply -var-file=environment/dev.tfvars
 - ❌ Individual Cloud Run Jobs
 - ❌ Feature code
 - ❌ Feature deployments
-
-### Features Repo
-
-**Manages:**
-- ✅ Individual Cloud Run Jobs
-- ✅ Feature code (Python, etc.)
-- ✅ Feature Dockerfiles
-- ✅ Feature dependencies
-- ✅ Feature-specific Terraform
-
-**Does NOT manage:**
-- ❌ Base infrastructure
-- ❌ Service accounts
-- ❌ Artifact Registry
-- ❌ Composer
 
 ## Benefits of Multi-Repo Setup
 
@@ -505,78 +361,18 @@ terraform apply -var-file=environment/dev.tfvars
 - Run `terraform apply` in this repo after changes
 - Wait a few minutes for IAM propagation
 
-### Composer Not Accessible
+### Scheduler Not Accessible
 
 **Check:**
-- Composer deployment completed (15-20 minutes)
-- Get Airflow URI: `terraform output composer_airflow_uri`
+- Cloud Scheduler API is enabled: `gcloud services list --enabled | grep scheduler`
+- Service account has `roles/run.invoker` permission
 - Check IAM permissions for your user account
-
-## Example: Complete Setup
-
-### Step 1: Deploy Base (This Repo)
-
-```bash
-# Clone this repo
-git clone https://github.com/your-org/nc-gcp-mvp.git
-cd nc-gcp-mvp/terraform
-
-# Configure
-cp backend/dev.tfbackend.example backend/dev.tfbackend
-cp environment/dev.tfvars.example environment/dev.tfvars
-vim environment/dev.tfvars  # Set github_repository to features repo!
-
-# Deploy
-terraform init -backend-config=backend/dev.tfbackend
-terraform apply -var-file=environment/dev.tfvars
-
-# Get outputs
-terraform output > ../base-outputs.txt
-```
-
-### Step 2: Setup Features Repo
-
-```bash
-# Create/clone features repo
-git clone https://github.com/your-org/nc-gcp-features.git
-cd nc-gcp-features
-
-# Copy template files from base repo
-cp -r ../nc-gcp-mvp/features .
-mkdir -p .github/workflows
-cp features/possible_cicd.yaml .github/workflows/deploy-features.yml
-
-# Add GitHub secrets (from base-outputs.txt)
-# - WORKLOAD_IDENTITY_PROVIDER
-# - SERVICE_ACCOUNT_EMAIL
-# - TERRAFORM_BACKEND_BUCKET
-# - ENVIRONMENT
-
-# Commit
-git add .
-git commit -m "Initial setup"
-git push
-```
-
-### Step 3: Add First Feature
-
-```bash
-# In features repo
-cp -r features/example-feature features/my-feature
-vim features/my-feature/main.py
-
-git add features/my-feature
-git commit -m "Add my-feature"
-git push
-
-# GitHub Actions automatically deploys!
-```
 
 ## Summary
 
 ### What This Repo Provides
 
-- **Shared Infrastructure**: Composer, Artifact Registry, Service Accounts
+- **Shared Infrastructure**: Cloud Scheduler, Artifact Registry, Service Accounts
 - **Authentication**: Workload Identity for keyless GitHub Actions
 - **Outputs**: Configuration for features to consume
 - **Foundation**: Secure, scalable base for unlimited features

@@ -8,7 +8,7 @@ variable "project_id" {
 variable "region" {
   description = "GCP region for resources"
   type        = string
-  default     = "europe-west2"
+  default     = "europe-west3"
 }
 
 variable "environment" {
@@ -28,8 +28,6 @@ variable "terraform_backend_bucket" {
 
 # Workload Identity variables
 variable "github_repository" {
-  description = "GitHub repository for monorepo (e.g., 'myorg/nc-gcp-mvp')"
+  description = "GitHub repository for monorepo (e.g., 'myorg/gcp-mvp')"
   type        = string
 }
-
-# Resource variables

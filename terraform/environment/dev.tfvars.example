@@ -1,5 +1,5 @@
-project_id               = "your-project-id"
-region                   = "europe-west2"
-terraform_backend_bucket = "terraform-bootstrap-base-infra"
-environment              = "dev"
-github_repository        = "your-org/nc-gcp-mvp"  # This repository
+project_id        = "your-project-id"
+region            = "europe-west3"
+terraform_backend_bucket = "terraform-state-your-project-id"
+environment       = "dev"
+github_repository = "your-org/terraform-gcp-features"  # Your FEATURES repo

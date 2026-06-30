@@ -2,6 +2,12 @@
 
 This guide helps you set up the initial prerequisites before deploying the base infrastructure.
 
+> **⚠️ Note for Windows/PowerShell users:** All commands below use Bash syntax (`export`, `\`, `cat > EOF`).
+> If you use PowerShell, replace:
+> - `export VAR="value"` → `$VAR="value"`
+> - Line continuation `\` → `` ` ``
+> - `cat > file <<EOF` → use a text editor or `Set-Content`
+
 ## The Bootstrap Problem
 
 You need:
@@ -60,7 +66,7 @@ gcloud services enable cloudresourcemanager.googleapis.com
 ```bash
 # Set variables
 export PROJECT_ID="your-project-id"
-export REGION="europe-west2"
+export REGION="europe-west3"
 export BUCKET_NAME="terraform-state-${PROJECT_ID}"
 
 # Create bucket
@@ -70,12 +76,16 @@ gcloud storage buckets create gs://${BUCKET_NAME} \
   --uniform-bucket-level-access
 
 # Enable versioning (recommended for state files)
-gcloud storage buckets update gs://${BUCKET_NAME} \
-  --versioning
+gcloud storage buckets update gs://${BUCKET_NAME} --versioning
 
 # Verify
 gcloud storage buckets describe gs://${BUCKET_NAME}
 ```
+
+> **PowerShell users:** Run each command on a single line (remove `\`):
+> ```powershell
+> gcloud storage buckets create gs://terraform-state-your-project-id --project=your-project-id --location=europe-west2 --uniform-bucket-level-access
+> ```
 
 **Important**: Save the bucket name! You'll need it for Terraform backend configuration.
 
@@ -109,7 +119,7 @@ vim environment/dev.tfvars
 project_id         = "your-project-id"
 region            = "europe-west2"
 environment       = "dev"
-github_repository = "your-org/your-features-repo"  # Your FEATURES repo
+github_repository = "your-org/terraform-gcp-features"  # Your FEATURES repo
 ```
 
 ### Step 6: Deploy Base Infrastructure
@@ -121,7 +131,7 @@ terraform init -backend-config=backend/dev.tfbackend
 # Review plan
 terraform plan -var-file=environment/dev.tfvars
 
-# Deploy (creates Workload Identity, Composer, etc.)
+# Deploy (creates Workload Identity, Cloud Scheduler SA, etc.)
 terraform apply -var-file=environment/dev.tfvars
 ```
 
@@ -153,102 +163,28 @@ You now have:
 
 ---
 
-## Option B: Local State Bootstrap
+## Option B: Local State Bootstrap (Alternative)
 
-Use this if you want Terraform to create the bucket, then migrate state.
+Use this if you want Terraform to create the bucket instead of using `gcloud`, then migrate state.
 
 ### Step 1: Create Bootstrap Terraform
 
-Create a separate bootstrap configuration:
-
 ```bash
-mkdir -p bootstrap
-cd bootstrap
+mkdir -p bootstrap && cd bootstrap
 ```
 
-**bootstrap/main.tf:**
-```hcl
-terraform {
-  required_version = "~> 1.5"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "7.16.0"
-    }
-  }
-  # No backend - uses local state
-}
-
-provider "google" {
-  project = var.project_id
-  region  = var.region
-}
-
-# Enable Storage API
-resource "google_project_service" "storage" {
-  service = "storage.googleapis.com"
-}
-
-# Create state bucket
-resource "google_storage_bucket" "terraform_state" {
-  name          = "terraform-state-${var.project_id}"
-  location      = var.region
-  force_destroy = false
-
-  uniform_bucket_level_access = true
-
-  versioning {
-    enabled = true
-  }
-
-  lifecycle_rule {
-    condition {
-      num_newer_versions = 3
-    }
-    action {
-      type = "Delete"
-    }
-  }
-
-  depends_on = [google_project_service.storage]
-}
-
-variable "project_id" {
-  type = string
-}
-
-variable "region" {
-  type = string
-}
-
-output "bucket_name" {
-  value = google_storage_bucket.terraform_state.name
-}
-```
-
-**bootstrap/terraform.tfvars:**
-```hcl
-project_id = "your-project-id"
-region     = "europe-west2"
-```
+Create `bootstrap/main.tf` with:
+- A `google_storage_bucket` resource (name: `terraform-state-{project-id}`)
+- `google_project_service "storage"` API enablement
+- No backend (local state)
+- Output the bucket name
 
 ### Step 2: Run Bootstrap
 
 ```bash
-cd bootstrap
-
-# Authenticate
-gcloud auth application-default login
-
-# Initialize (local state)
 terraform init
-
-# Create bucket
-terraform apply
-
-# Get bucket name
+terraform apply   # Creates the bucket
 BUCKET_NAME=$(terraform output -raw bucket_name)
-echo "Bucket created: ${BUCKET_NAME}"
 ```
 
 ### Step 3: Configure Main Terraform
@@ -256,39 +192,29 @@ echo "Bucket created: ${BUCKET_NAME}"
 ```bash
 cd ../terraform
 
-# Configure backend with the created bucket
 cat > backend/dev.tfbackend <<EOF
 bucket = "${BUCKET_NAME}"
 prefix = "base/dev"
 EOF
 
-# Configure variables
 cp environment/dev.tfvars.example environment/dev.tfvars
-vim environment/dev.tfvars
 ```
 
 ### Step 4: Deploy Base Infrastructure
 
 ```bash
-# Initialize with remote backend
 terraform init -backend-config=backend/dev.tfbackend
-
-# Deploy
 terraform apply -var-file=environment/dev.tfvars
 ```
 
-### Step 5: (Optional) Migrate Bootstrap State
-
-If you want to manage the bucket with Terraform too:
+### Step 5: (Optional) Migrate Bootstrap State to GCS
 
 ```bash
-# Copy bootstrap state to GCS
 cd ../bootstrap
-terraform init -migrate-state -backend-config=- <<EOF
-bucket = "${BUCKET_NAME}"
-prefix = "bootstrap/dev"
-EOF
+terraform init -migrate-state -backend-config="bucket=${BUCKET_NAME}" -backend-config="prefix=bootstrap/dev"
 ```
+
+> **See [Option A](#option-a-manual-bootstrap-recommended) for a detailed bootstrap/main.tf example.**
 
 ---
 
@@ -303,11 +229,11 @@ EOF
 
 ### By Base Infrastructure Terraform
 
-- **Cloud Composer** environment
+- **Cloud Scheduler** service account
 - **Artifact Registry** repository
 - **Service Accounts** (3):
-  - Composer
   - Cloud Run Jobs
+  - Scheduler
   - CI/CD
 - **IAM Bindings** for service accounts
 - **Workload Identity Pool** and Provider
@@ -360,19 +286,19 @@ gcloud iam workload-identity-pools providers list \
 gcloud iam service-accounts list --project=YOUR-PROJECT-ID
 
 # Should see:
-# - dev-composer-{project}@...
 # - dev-cloud-run-jobs@...
+# - dev-scheduler@...
 # - dev-cicd@...
 ```
 
-### ✅ Composer
+### ✅ Cloud Scheduler
 
 ```bash
-# List Composer environments
-gcloud composer environments list --locations=YOUR-REGION
+# List Cloud Scheduler jobs (after features are deployed)
+gcloud scheduler jobs list --location=YOUR-REGION
 
-# Get Airflow URI
-terraform output composer_airflow_uri
+# Get scheduler service account
+terraform output scheduler_service_account_email
 ```
 
 ---
@@ -548,5 +474,3 @@ After bootstrap is complete:
 3. ✅ Set up features repository
 4. ✅ Add GitHub secrets to features repo
 5. ✅ Start deploying features!
-
-See main [README.md](README.md) for features repository setup.

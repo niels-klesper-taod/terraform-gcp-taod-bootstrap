@@ -33,12 +33,12 @@ provider "google" {
 # Cloud Run Jobs, and Workload Identity
 resource "google_project_service" "required_apis" {
   for_each = toset([
-    "composer.googleapis.com",         # Cloud Composer (Airflow)
     "artifactregistry.googleapis.com", # Docker image storage
     "secretmanager.googleapis.com",    # Secret management
     "run.googleapis.com",              # Cloud Run Jobs
     "iam.googleapis.com",              # Workload Identity
-    "iamcredentials.googleapis.com"    # Workload Identity credentials
+    "iamcredentials.googleapis.com",   # Workload Identity credentials
+    "cloudscheduler.googleapis.com"    # Cloud Scheduler for cron triggers
   ])
   service = each.value
 }
@@ -50,17 +50,14 @@ resource "google_artifact_registry_repository" "docker_repo" {
   location      = var.region
   repository_id = join("-", [var.environment, var.project_id])
   format        = "DOCKER"
+
+  # Ensure APIs are enabled before creating the repository
+  depends_on = [google_project_service.required_apis]
 }
 
 
 # Service Accounts
 # Creates dedicated service accounts for different components
-
-# Service account for Cloud Composer (Airflow)
-resource "google_service_account" "composer" {
-  account_id   = join("-", [var.environment, "composer", var.project_id])
-  display_name = join("-", [var.environment, "composer-service-account", var.project_id])
-}
 
 # Service account for Cloud Run Jobs execution
 resource "google_service_account" "cloud_run_jobs" {
@@ -68,27 +65,16 @@ resource "google_service_account" "cloud_run_jobs" {
   display_name = join("-", [var.environment, "cloud-run-jobs-service-account", var.project_id])
 }
 
+# Service account for Cloud Scheduler to invoke Cloud Run Jobs
+resource "google_service_account" "scheduler" {
+  account_id   = join("-", [var.environment, "scheduler"])
+  display_name = join("-", [var.environment, "scheduler-service-account", var.project_id])
+}
+
 # Service account for CI/CD pipeline (GitHub Actions)
 resource "google_service_account" "cicd" {
   account_id   = join("-", [var.environment, "cicd"])
   display_name = join("-", [var.environment, "cicd-service-account", var.project_id])
-}
-
-# IAM permissions for Composer service account
-# Grants necessary roles for Airflow to function and invoke Cloud Run Jobs
-
-# Allows Composer to perform worker operations
-resource "google_project_iam_member" "composer_worker" {
-  project = var.project_id
-  role    = "roles/composer.worker"
-  member  = "serviceAccount:${google_service_account.composer.email}"
-}
-
-# Allows Composer to invoke Cloud Run Jobs from DAGs
-resource "google_project_iam_member" "composer_invoke_run" {
-  project = var.project_id
-  role    = "roles/run.invoker"
-  member  = "serviceAccount:${google_service_account.composer.email}"
 }
 
 # IAM permissions for Cloud Run Jobs service account
@@ -125,81 +111,11 @@ resource "google_project_iam_member" "cicd_run_admin" {
   member  = "serviceAccount:${google_service_account.cicd.email}"
 }
 
-# Allows CI/CD to act as service accounts when deploying
+# Allows CI/CD to act as service accounts when deploying Cloud Run Jobs from GitHub Actions
 resource "google_project_iam_member" "cicd_service_account_user" {
   project = var.project_id
   role    = "roles/iam.serviceAccountUser"
   member  = "serviceAccount:${google_service_account.cicd.email}"
-}
-
-# Cloud Composer (Managed Airflow) environment
-# Orchestrates data pipelines and workflows
-resource "google_composer_environment" "main" {
-  name   = join("-", [var.environment, "airflow", var.project_id])
-  region = var.region
-
-  config {
-
-    # Software configuration - uses Composer 3 with Airflow 2
-    software_config {
-      image_version = "composer-3-airflow-2"
-    }
-
-    # Resource allocation for Composer workloads
-    # Configured for small-scale operations with minimal resources
-    workloads_config {
-      # Scheduler: manages task scheduling and execution
-      scheduler {
-        cpu        = 0.5
-        memory_gb  = 2
-        storage_gb = 1
-        count      = 1
-      }
-      # Triggerer: handles deferred tasks and sensors
-      triggerer {
-        cpu       = 0.5
-        memory_gb = 1
-        count     = 1
-      }
-      # DAG Processor: parses and processes DAG files
-      dag_processor {
-        cpu        = 1
-        memory_gb  = 2
-        storage_gb = 1
-        count      = 1
-      }
-      # Web Server: provides Airflow UI
-      web_server {
-        cpu        = 0.5
-        memory_gb  = 2
-        storage_gb = 1
-      }
-      # Worker: executes tasks from the queue
-      worker {
-        cpu        = 0.5
-        memory_gb  = 2
-        storage_gb = 1
-        min_count  = 1
-        max_count  = 3
-      }
-
-    }
-    # Node configuration - uses dedicated Composer service account
-    node_config {
-      service_account = google_service_account.composer.email
-    }
-    # Small environment size for cost optimization
-    environment_size = "ENVIRONMENT_SIZE_SMALL"
-
-  }
-
-  labels = {
-    application = "orchestration"
-  }
-
-  # Ensure IAM permissions are set before creating Composer
-  depends_on = [google_project_iam_member.composer_worker]
-
 }
 
 # Workload Identity Federation for GitHub Actions
@@ -214,6 +130,8 @@ data "google_project" "project" {
 resource "google_iam_workload_identity_pool" "github" {
   workload_identity_pool_id = "${var.environment}-github-pool"
   display_name              = "GitHub Actions Pool"
+
+  depends_on = [google_project_service.required_apis]
 }
 
 # Configure GitHub as an OIDC identity provider
@@ -236,6 +154,8 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
   }
+
+  depends_on = [google_project_service.required_apis]
 }
 
 # Grant GitHub Actions permission to impersonate the CI/CD service account
@@ -262,4 +182,5 @@ resource "google_secret_manager_secret" "app_secrets" {
 
   # Deletion protection disabled for easier cleanup in non-production environments
   deletion_protection = false
+  depends_on          = [google_project_service.required_apis]
 }
